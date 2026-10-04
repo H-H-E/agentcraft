@@ -12,6 +12,7 @@
     "start": "node --import tsx src/main.ts",
     "tui": "node --import tsx scripts/fake-mod.ts",
     "test": "vitest run",
+    "smoke:minimax": "node --import tsx scripts/minimax-smoke.ts",
     "typecheck": "tsc --noEmit",
     "gen:protocol-doc": "node --import tsx scripts/gen-protocol-doc.ts",
     "check:protocol-doc": "node --import tsx scripts/gen-protocol-doc.ts --check",

@@ -35,7 +35,7 @@ import { formatInbox } from '../../bus.js';
 import { descendantsOf, killSnapshot, killTree, orphansOf, processTable, type ProcEntry } from '../../util/proc.js';
 import { truncate } from '../../util/text.js';
 import { leadSystemPrompt, planPrompt, RESUME_PROMPT, reviewPrompt, workerSystemPrompt, workPrompt } from './prompts.js';
-import { detectApiAuth, NO_API_AUTH_MESSAGE, withAuthMode } from './auth.js';
+import { detectApiAuth, isAuthenticationFailure, miniMaxError, NO_API_AUTH_MESSAGE, redactAuthSecrets, withAuthMode, withMiniMax } from './auth.js';
 import { StreamMapper, type TurnStats } from './stream.js';
 import { buildMcpServer, MCP_SERVER, type ToolHooks, type TurnHandle } from './tools.js';
 import { userName } from '../../user.js';
@@ -223,41 +223,46 @@ export class ClaudeBackend implements Backend {
 
   async checkAuth(): Promise<boolean> {
     if (this.opts.skipAuthCheck) {
-      this.fm.setStatus({ auth: 'ok', message: `Claude (lead ${this.cfg.leadModel}, workers ${this.cfg.workerModel})` });
+      this.fm.setStatus({ auth: 'ok', message: this.modelStatus() });
       return true;
     }
     // API authentication by default; the claude.ai login only when explicitly opted into
-    const api = detectApiAuth(process.env);
+    const api = detectApiAuth(this.env());
     if (!this.cfg.useClaudeLogin && !api.ok) {
-      this.markAuthFailed(NO_API_AUTH_MESSAGE);
+      this.markAuthFailed(this.cfg.provider === 'minimax' ? 'MiniMax key missing. Set MINIMAX_API_KEY to your Coding/Token Plan key, then restart the Foreman.' : NO_API_AUTH_MESSAGE);
       return false;
     }
-    this.fm.setStatus({ auth: 'checking', message: this.cfg.useClaudeLogin ? 'Checking Claude login...' : 'Checking Claude API access...' });
+    this.fm.setStatus({ auth: 'checking', message: this.cfg.useClaudeLogin ? 'Checking Claude login...' : `Checking ${this.providerName()} API configuration...` });
     async function* never(): AsyncGenerator<never> {
       await new Promise(() => undefined);
     }
-    const q = this.queryFn({ prompt: never(), options: { settingSources: [], persistSession: false, permissionMode: 'default', env: this.env() } });
+    let q: ReturnType<typeof query> | undefined;
+    let timer: NodeJS.Timeout | undefined;
     try {
-      const info = await Promise.race([q.accountInfo(), new Promise<never>((_, r) => setTimeout(() => r(new Error('timed out after 45s')), 45_000))]);
+      q = this.queryFn({ prompt: never(), options: { settingSources: [], persistSession: false, permissionMode: 'default', env: this.env() } });
+      // SDK 0.3.286 returns initialization metadata here, not an Anthropic account HTTP request.
+      // This confirms configuration; a gateway's first real request validates its credentials.
+      const info = await Promise.race([q.accountInfo(), new Promise<never>((_, r) => { timer = setTimeout(() => r(new Error('timed out after 45s')), 45_000); })]);
       const ok = !!(info.email || info.organization || (info.apiKeySource && info.apiKeySource !== 'none') || (info.tokenSource && info.tokenSource !== 'none') || (info.apiProvider && info.apiProvider !== 'firstParty'));
       if (!ok) throw new Error('not logged in');
       const account = this.cfg.useClaudeLogin
         ? [info.organization, info.subscriptionType].filter(Boolean).join(' · ') || info.apiProvider || 'ok'
-        : [api.ok ? api.source : 'API', info.organization].filter(Boolean).join(' · ');
+        : [this.cfg.provider === 'minimax' ? 'MiniMax API gateway' : api.ok ? api.source : 'API', info.organization].filter(Boolean).join(' · ');
       this.authFailed = false;
-      this.fm.setStatus({ auth: 'ok', account, message: `Claude (lead ${this.cfg.leadModel}, workers ${this.cfg.workerModel})` });
-      this.fm.log.info(`claude auth ok (${account})`);
+      this.fm.setStatus({ auth: 'ok', account: redactAuthSecrets(account), message: this.modelStatus() });
+      this.fm.log.info(`${this.providerName()} auth configured (${redactAuthSecrets(account)})`);
       return true;
     } catch (e) {
       this.markAuthFailed(
-        this.cfg.useClaudeLogin
-          ? `Claude login check failed: ${(e as Error).message}. Run \`claude\` and /login, then restart the Foreman. The sim backend still works.`
-          : `Claude API check failed: ${(e as Error).message}. Check ANTHROPIC_API_KEY (or your cloud provider settings), then restart the Foreman. The sim backend still works.`,
+        this.cfg.provider === 'minimax' ? miniMaxError((e as Error).message ?? String(e)) : this.cfg.useClaudeLogin
+          ? `Claude login check failed: ${redactAuthSecrets((e as Error).message)}. Run \`claude\` and /login, then restart the Foreman. The sim backend still works.`
+          : `Claude API check failed: ${redactAuthSecrets((e as Error).message)}. Check ANTHROPIC_API_KEY (or your cloud provider settings), then restart the Foreman. The sim backend still works.`,
       );
       return false;
     } finally {
+      if (timer) clearTimeout(timer);
       try {
-        q.close();
+        q?.close();
       } catch {
         /* ignore */
       }
@@ -265,12 +270,21 @@ export class ClaudeBackend implements Backend {
   }
 
   private markAuthFailed(message: string): void {
+    message = redactAuthSecrets(message);
     this.authFailed = true;
     this.fm.setStatus({ auth: 'failed', message });
     this.fm.log.error(message);
     this.fm.bus.feed('error', message);
     this.fm.notify('warn', message);
     if (process.stdout.isTTY) process.stdout.write('\x07');
+  }
+
+  private providerName(): string {
+    return this.cfg.provider === 'minimax' ? 'MiniMax' : 'Claude';
+  }
+
+  private modelStatus(): string {
+    return redactAuthSecrets(`${this.providerName()} (lead ${this.cfg.leadModel}, workers ${this.cfg.workerModel})`);
   }
 
   private openQuestion(agentId: string): Decision | undefined {
@@ -462,7 +476,7 @@ export class ClaudeBackend implements Backend {
   async submitGoal(goal: Goal): Promise<void> {
     if (this.authFailed) {
       this.fm.setGoal(goal.id, { status: 'failed' });
-      throw new ClientError(`Claude is not available: ${this.fm.status.message ?? 'auth failed'}`);
+      throw new ClientError(`${this.providerName()} is not available: ${this.fm.status.message ?? 'auth failed'}`);
     }
     const repo = this.fm.repos.require(goal.repoId!);
     if (this.isStopped(LEAD)) {
@@ -593,7 +607,9 @@ export class ClaudeBackend implements Backend {
   }
 
   private env(who: { agentId?: string; cwd?: string } = {}): Record<string, string | undefined> {
-    return withAuthMode(agentEnv(process.env, who), this.cfg.useClaudeLogin);
+    const env = withAuthMode(agentEnv(process.env, who), this.cfg.useClaudeLogin);
+    if (this.cfg.provider !== 'minimax') return env;
+    return withMiniMax(env, this.cfg.minimaxBaseUrl, who.agentId && who.agentId !== LEAD ? this.cfg.workerModel : this.cfg.leadModel);
   }
 
   private cwdFor(job: Job): { cwd: string; role: 'lead' | 'worker' } {
@@ -694,7 +710,8 @@ export class ClaudeBackend implements Backend {
       const options: Options = {
         cwd,
         model,
-        effort: role === 'lead' ? this.cfg.leadEffort : this.cfg.effort,
+        // M3's documented gateway does not expose Claude's effort control. Keep it for Anthropic.
+        ...(this.cfg.provider === 'minimax' ? {} : { effort: role === 'lead' ? this.cfg.leadEffort : this.cfg.effort }),
         maxTurns: role === 'lead' ? this.cfg.maxTurnsLead : this.cfg.maxTurnsWorker,
         settingSources: [],
         permissionMode: 'default',
@@ -711,8 +728,8 @@ export class ClaudeBackend implements Backend {
         spawnClaudeCodeProcess: (o) => {
           const child = spawn(o.command, o.args, { cwd: o.cwd, env: o.env as NodeJS.ProcessEnv, stdio: ['pipe', 'pipe', 'pipe'], signal: o.signal, windowsHide: true });
           child.stderr?.setEncoding('utf8');
-          child.stderr?.on('data', (s: string) => this.fm.log.debug(`[${agentId} stderr] ${s.trim().slice(0, 300)}`));
-          child.on('error', (e) => this.fm.log.debug(`[${agentId}] CLI process error: ${e.message}`));
+          child.stderr?.on('data', (s: string) => this.fm.log.debug(`[${agentId} stderr] ${redactAuthSecrets(s.trim()).slice(0, 300)}`));
+          child.on('error', (e) => this.fm.log.debug(`[${agentId}] CLI process error: ${redactAuthSecrets(e.message)}`));
           entry.child = child;
           entry.spawnedAt = Date.now();
           return child;
@@ -744,7 +761,10 @@ export class ClaudeBackend implements Backend {
         else abort.signal.addEventListener('abort', closeQuery, { once: true });
         for await (const msg of q) {
           if (abort.signal.aborted) break; // nothing from an aborted turn reaches the world
-          mapper.handle(msg);
+          // Sanitize stream text before it reaches log entries, status, or persisted errors.
+          const raw = JSON.stringify(msg);
+          const safe = redactAuthSecrets(raw);
+          mapper.handle(safe === raw ? msg : JSON.parse(safe));
           if (mapper.stats.sessionId && this.fm.store.data.sessions[job.sessionKey]?.sessionId !== mapper.stats.sessionId) {
             this.recordSession(job.sessionKey, mapper.stats.sessionId, model);
           }
@@ -753,15 +773,20 @@ export class ClaudeBackend implements Backend {
         clearTimeout(timer);
       }
       stats = mapper.stats;
+      if (this.cfg.provider === 'minimax' && stats.isError) {
+        stats.errors = (stats.errors.length ? stats.errors : [stats.resultText ?? stats.subtype ?? 'API error']).map(miniMaxError);
+        this.fm.agentLog(agentId, 'error', truncate(stats.errors.join('; '), 600));
+      }
       if (stats.sessionId) this.recordSession(job.sessionKey, stats.sessionId, model, stats);
-      if (stats.authFailed) this.markAuthFailed(`Claude authentication failed (${stats.authFailed}). Run \`claude\` and /login, then restart the Foreman.`);
+      if (stats.authFailed) this.markAuthFailed(this.cfg.provider === 'minimax' ? miniMaxError(stats.authFailed) : `Claude authentication failed (${stats.authFailed}). ${this.cfg.useClaudeLogin ? 'Run \`claude\` and /login' : 'Check your API credentials'}, then restart the Foreman.`);
     } catch (e) {
       const aborted = abort.signal.aborted;
       if (!aborted) {
-        const msg = (e as Error).message ?? String(e);
+        const raw = redactAuthSecrets((e as Error).message ?? String(e));
+        const msg = this.cfg.provider === 'minimax' ? miniMaxError(raw) : raw;
         this.fm.log.error(`${agentId} ${job.kind} failed: ${msg}`);
         this.fm.agentLog(agentId, 'error', `session error: ${truncate(msg, 400)}`);
-        if (/auth|login|credential|401/i.test(msg)) this.markAuthFailed(`Claude authentication failed: ${truncate(msg, 160)}`);
+        if (isAuthenticationFailure(raw)) this.markAuthFailed(this.cfg.provider === 'minimax' ? truncate(msg, 400) : `Claude authentication failed: ${truncate(msg, 160)}`);
         stats = { isError: true, errors: [msg] };
       }
     } finally {

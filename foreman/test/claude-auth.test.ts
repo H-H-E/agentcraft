@@ -9,6 +9,8 @@ describe('detectApiAuth', () => {
     expect(detectApiAuth({ ANTHROPIC_API_KEY: 'sk-ant-x' })).toEqual({ ok: true, source: 'API key' });
     expect(detectApiAuth({ CLAUDE_CODE_USE_BEDROCK: '1' })).toEqual({ ok: true, source: 'Amazon Bedrock' });
     expect(detectApiAuth({ CLAUDE_CODE_USE_VERTEX: 'true' })).toEqual({ ok: true, source: 'Google Vertex AI' });
+    expect(detectApiAuth({ CLAUDE_CODE_USE_FOUNDRY: '1' })).toEqual({ ok: true, source: 'Microsoft Foundry' });
+    expect(detectApiAuth({ CLAUDE_CODE_USE_ANTHROPIC_AWS: '1' })).toEqual({ ok: true, source: 'Claude Platform on AWS' });
     expect(detectApiAuth({ CLAUDE_CODE_USE_BEDROCK: '0' })).toEqual({ ok: false });
     expect(detectApiAuth({ ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_BASE_URL: 'https://gw' })).toEqual({ ok: true, source: 'API gateway' });
     expect(detectApiAuth({ ANTHROPIC_API_KEY: '  ', CLAUDE_CODE_OAUTH_TOKEN: 'oauth' })).toEqual({ ok: false });

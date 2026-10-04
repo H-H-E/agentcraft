@@ -6,6 +6,7 @@ import { readJson } from './util/fsx.js';
 import type { BackendName } from './protocol.js';
 import { defaultUserName } from './user.js';
 import type { EffortLevel } from '@anthropic-ai/claude-agent-sdk';
+import { MINIMAX_DEFAULT_BASE_URL, MINIMAX_DEFAULT_MODEL, miniMaxModel, validateMiniMaxBaseUrl, type InferenceProvider } from './agents/claude/auth.js';
 
 export const FOREMAN_VERSION = '0.1.0';
 
@@ -13,6 +14,9 @@ export const FOREMAN_VERSION = '0.1.0';
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 export interface ClaudeConfig {
+  /** Inference provider; both use the existing Claude Agent SDK harness. No credentials here. */
+  provider: InferenceProvider;
+  minimaxBaseUrl: string;
   leadModel: string;
   workerModel: string;
   effort: EffortLevel;
@@ -148,7 +152,7 @@ function effort(v: unknown, d: EffortLevel): EffortLevel {
 
 /** Every flag loadConfig reads (the `no-` prefix is stripped by parseFlags). */
 export const KNOWN_FLAGS = new Set([
-  'home', 'backend', 'profile', 'user-name', 'use-claude-login', 'repo', 'workers', 'model', 'port', 'goal', 'autostart', 'reset', 'notify',
+  'home', 'backend', 'provider', 'profile', 'user-name', 'use-claude-login', 'repo', 'workers', 'model', 'port', 'goal', 'autostart', 'reset', 'notify',
   'toast-silent', 'debug', 'quiet', 'allow-browser-origins', 'repo-poll-ms', 'merge-style', 'sign-merges',
   'lead-model', 'worker-model', 'effort', 'lead-effort', 'max-turns', 'max-turns-lead', 'max-turns-worker',
   'max-concurrent', 'ci', 'max-budget', 'resume', 'lead-review', 'speed', 'seed', 'showcase', 'auto-answer',
@@ -180,6 +184,12 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
   const backendRaw = String(pick('backend', 'AGENTCRAFT_BACKEND') ?? 'claude');
   if (backendRaw !== 'sim' && backendRaw !== 'claude') throw new Error(`unknown backend "${backendRaw}" (use sim or claude)`);
   const backend = backendRaw as BackendName;
+  // Provider settings have no effect on the sim, including stale or invalid environment values.
+  const providerRaw = backend === 'sim' ? 'anthropic' : pick('provider', 'AGENTCRAFT_PROVIDER') ?? fileClaude.provider ?? 'anthropic';
+  if (providerRaw !== 'anthropic' && providerRaw !== 'minimax') throw new Error('unknown provider (use anthropic or minimax)');
+  const provider = providerRaw as InferenceProvider;
+  const useClaudeLogin = bool(flags['use-claude-login'] ?? env.AGENTCRAFT_USE_CLAUDE_LOGIN ?? fileClaude.useClaudeLogin, false);
+  if (provider === 'minimax' && useClaudeLogin) throw new Error('--use-claude-login cannot be combined with --provider minimax. Use MINIMAX_API_KEY and --no-use-claude-login.');
   const profile = str(pick('profile', 'AGENTCRAFT_PROFILE')) ?? backend;
   if (!/^[a-zA-Z0-9_-]+$/.test(profile)) throw new Error(`bad profile name "${profile}"`);
 
@@ -198,6 +208,16 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
       : ['juniper', 'kit', 'wren'];
 
   const model = str(flags.model);
+  const minimaxModel = str(env.MINIMAX_MODEL?.trim()) ?? MINIMAX_DEFAULT_MODEL;
+  const roleModel = (role: 'lead' | 'worker'): string => {
+    const selected = str(flags[`${role}-model`]) ?? model
+      ?? (provider === 'minimax' ? str(env[`MINIMAX_${role.toUpperCase()}_MODEL`]?.trim()) : undefined)
+      ?? str(env[`AGENTCRAFT_${role.toUpperCase()}_MODEL`])
+      ?? (provider === 'minimax' ? str(env.MINIMAX_MODEL?.trim()) : undefined)
+      ?? str(fileClaude[`${role}Model`])
+      ?? (provider === 'minimax' ? minimaxModel : role === 'lead' ? 'opus' : 'sonnet');
+    return provider === 'minimax' ? miniMaxModel(selected, minimaxModel) : selected;
+  };
   const cfg: Config = {
     backend,
     userName: (str(pick('user-name', 'AGENTCRAFT_USER_NAME')) ?? str(file.userName))?.trim().slice(0, 40) || defaultUserName(),
@@ -221,8 +241,10 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
     // the sim answers merges unattended (screenshot QA, --auto-answer): never sign there
     signMerges: bool(pick('sign-merges', 'AGENTCRAFT_SIGN_MERGES'), backend === 'claude'),
     claude: {
-      leadModel: str(flags['lead-model']) ?? model ?? str(env.AGENTCRAFT_LEAD_MODEL) ?? str(fileClaude.leadModel) ?? 'opus',
-      workerModel: str(flags['worker-model']) ?? model ?? str(env.AGENTCRAFT_WORKER_MODEL) ?? str(fileClaude.workerModel) ?? 'sonnet',
+      provider,
+      minimaxBaseUrl: provider === 'minimax' ? validateMiniMaxBaseUrl(str(env.MINIMAX_BASE_URL?.trim()) ?? str(fileClaude.minimaxBaseUrl) ?? MINIMAX_DEFAULT_BASE_URL) : MINIMAX_DEFAULT_BASE_URL,
+      leadModel: roleModel('lead'),
+      workerModel: roleModel('worker'),
       effort: effort(flags.effort ?? fileClaude.effort, 'medium'),
       leadEffort: effort(flags['lead-effort'] ?? flags.effort ?? fileClaude.leadEffort, 'medium'),
       maxTurnsLead: num(flags['max-turns-lead'] ?? flags['max-turns'] ?? fileClaude.maxTurnsLead, 40),
@@ -233,7 +255,7 @@ export function loadConfig(argv: string[], env: NodeJS.ProcessEnv = process.env)
       maxBudgetUsdPerTurn: flags['max-budget'] !== undefined ? num(flags['max-budget'], 0) || undefined : (fileClaude.maxBudgetUsdPerTurn as number | undefined),
       resumeOnStart: bool(flags.resume ?? fileClaude.resumeOnStart, true),
       leadReview: bool(flags['lead-review'] ?? fileClaude.leadReview, true),
-      useClaudeLogin: bool(flags['use-claude-login'] ?? env.AGENTCRAFT_USE_CLAUDE_LOGIN ?? fileClaude.useClaudeLogin, false),
+      useClaudeLogin,
     },
     sim: {
       speed: Math.max(0.05, num(flags.speed ?? env.AGENTCRAFT_SIM_SPEED ?? fileSim.speed, 1)),
@@ -253,6 +275,7 @@ export const HELP = `AgentCraft Foreman ${FOREMAN_VERSION}
 usage: npm run start -- [options]
 
   --backend sim|claude     agent backend (default: claude)
+  --provider anthropic|minimax  inference provider for claude backend (env AGENTCRAFT_PROVIDER)
   --repo <path>[,<path>]   register local git repo(s) at start (sim: defaults to a fresh sandbox/sim-demo)
   --goal "<text>"          submit a goal right away
   --port <n>               WebSocket port (default 7878, env AGENTCRAFT_PORT)
@@ -281,11 +304,13 @@ usage: npm run start -- [options]
 
  claude backend
   auth: ANTHROPIC_API_KEY, or a cloud provider (CLAUDE_CODE_USE_BEDROCK / _VERTEX / _FOUNDRY)
+  minimax: --provider minimax + MINIMAX_API_KEY (Coding/Token Plan key); MINIMAX_MODEL defaults
+                           to MiniMax-M3, MINIMAX_BASE_URL to https://api.minimax.io/anthropic
   --use-claude-login       use your local \`claude\` CLI login instead (personal use only; env
                            AGENTCRAFT_USE_CLAUDE_LOGIN=1, config.json claude.useClaudeLogin)
   --model <m>              model for lead and workers (default lead: opus, workers: sonnet)
   --lead-model <m> / --worker-model <m>
-  --effort low|medium|high|xhigh|max   (default medium)
+  --effort low|medium|high|xhigh|max   (default medium; omitted for MiniMax)
   --max-turns <n>          turn cap per session run (default lead 40 / worker 80)
   --workers <n|ids>        team size or comma list (default juniper,kit,wren)
   --max-concurrent <n>     workers running at once (default 3)

@@ -72,6 +72,7 @@ most ~100 ms of state, and interrupted agent turns resume on the next start.
 | flag / env | default | |
 | --- | --- | --- |
 | `--backend sim\|claude` / `AGENTCRAFT_BACKEND` | `claude` | |
+| `--provider anthropic\|minimax` / `AGENTCRAFT_PROVIDER` | `anthropic` | inference for the Claude Agent SDK; ignored by sim |
 | `--port` / `AGENTCRAFT_PORT` | `7878` | WebSocket port (127.0.0.1 only) |
 | `--home` / `AGENTCRAFT_HOME` | `~/.agentcraft` | state root |
 | `--user-name` / `AGENTCRAFT_USER_NAME` / config `userName` | OS user name | how the agents address you; sent to the mod in `foreman.status` |
@@ -82,7 +83,7 @@ most ~100 ms of state, and interrupted agent turns resume on the next start.
 | `--notify` / `--no-notify` / `AGENTCRAFT_NOTIFY` | on for claude, off for sim | Windows or macOS notifications |
 | `--toast-silent` | | toast without sound |
 | `--model`, `--lead-model`, `--worker-model` | lead `opus`, workers `sonnet` | any model id/alias the CLI accepts |
-| `--effort low..max` | `medium` | |
+| `--effort low..max` | `medium` | omitted in MiniMax mode; unchanged for Anthropic |
 | `--workers 3` or `--workers kit,wren` | `juniper,kit,wren` | team (others stay "off shift") |
 | `--max-concurrent` | `3` | workers running at once |
 | `--max-turns`, `--max-budget <usd>` | 40 lead / 80 worker, none | per turn caps |
@@ -98,6 +99,41 @@ While running, `<home>/<profile>/foreman.json` records `{pid, port, host, backen
 so launch scripts can find it; `<home>/foreman.json` holds the same for the first live Foreman (when
 it exits, another live profile takes its place). A second Foreman on a profile that is already
 running is refused (two would both write its `state.json`).
+
+### MiniMax Coding/Token Plan
+
+Set `MINIMAX_API_KEY` in the launching terminal and run
+`npm run start -- --provider minimax --profile minimax --repo /path/to/repo`.
+`AGENTCRAFT_PROVIDER=minimax` is equivalent; `--backend claude` remains the backend.
+The key is read only from the environment and mapped to `ANTHROPIC_AUTH_TOKEN` only in the SDK
+child. Competing Anthropic API/OAuth/cloud-provider credentials are removed from that child.
+
+| environment | default | purpose |
+| --- | --- | --- |
+| `MINIMAX_API_KEY` | required | Coding/Token Plan credential; never stored in config or state |
+| `MINIMAX_BASE_URL` | `https://api.minimax.io/anthropic` | Anthropic-compatible gateway (no `/v1/messages` suffix) |
+| `MINIMAX_MODEL` | `MiniMax-M3` | shared model |
+| `MINIMAX_LEAD_MODEL`, `MINIMAX_WORKER_MODEL` | shared model | per-role override; CLI model flags take priority |
+
+All Claude model aliases in each child map to that agent's chosen MiniMax model. The SDK's
+`accountInfo()` reads initialization metadata and does not validate a gateway key by inference;
+the first real request does. MiniMax failures identify missing/rejected keys, model/endpoint errors,
+quota/rate limits or network failures. Secrets are redacted before SDK diagnostics are logged.
+`--use-claude-login` conflicts with MiniMax; override a saved login setting with `--no-use-claude-login`.
+Effort overrides are omitted for MiniMax, whose current M3 guide does not expose Claude's effort
+control. Anthropic effort and all orchestration/permission/merge behavior remain unchanged.
+The SDK may still send its own default effort; live gateway acceptance remains unverified.
+`MINIMAX_MODEL='MiniMax-M3[1m]'` opts into the guide's 1M context; the installed SDK otherwise
+assumes a conservative 200k window for this model.
+SDK USD estimates do not represent Coding Plan quota. Separate provider profiles avoid resuming
+sessions created with another provider; stop a reused launcher profile before switching it.
+
+`npm run smoke:minimax` runs real MiniMax inference on an isolated temporary git repo, checks
+MCP/task delivery, file tools, Bash tests, events, sessions and resumed lead review, and verifies
+that the merge stays pending and the base checkout is unchanged. It uses plan quota and requires
+an exported key; no permission or merge is automatically approved. This live check is pending
+until a key is available. See the [root setup guide](../README.md#minimax-codingtoken-plan) for
+PowerShell/macOS/Linux launch commands, compatibility notes and Command Code protocol limits.
 
 ## How the claude backend works
 

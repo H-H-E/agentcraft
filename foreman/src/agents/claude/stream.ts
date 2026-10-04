@@ -27,7 +27,7 @@ interface Block {
   is_error?: boolean;
 }
 
-const AUTH_RE = /(authentication|not logged in|log ?in|\/login|invalid api key|oauth|401|credential)/i;
+const AUTH_RE = /(authentication|not logged in|log ?in|\/login|invalid api key|oauth|\b401\b|\b403\b|credential)/i;
 
 function resultText(content: unknown): string {
   if (typeof content === 'string') return content;

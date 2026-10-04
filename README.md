@@ -168,13 +168,15 @@ AgentCraft is built to point at code you care about.
 **You need:** Windows 10 or 11, or macOS, Java 25, Node 22+, git, and a copy of
 Minecraft: Java Edition.
 
-**For the real agents** you need Claude API access, either of these:
+**For the real agents** you need API access through one of these:
 
 - `ANTHROPIC_API_KEY`: create a key at [console.anthropic.com](https://console.anthropic.com), then
   `setx ANTHROPIC_API_KEY sk-ant-...` and open a new terminal.
 - A cloud provider supported by the Agent SDK: Amazon Bedrock (`CLAUDE_CODE_USE_BEDROCK=1`), Google
   Vertex AI (`CLAUDE_CODE_USE_VERTEX=1`) or Microsoft Foundry (`CLAUDE_CODE_USE_FOUNDRY=1`), with that
   provider's usual credentials.
+- A [MiniMax Coding/Token Plan](https://platform.minimax.io/docs/token-plan/claude-code) key
+  with `--provider minimax` (see below). The same Claude Agent SDK runs the agents.
 
 Then:
 
@@ -215,6 +217,83 @@ the first time; in an older world, rebuild it with `/agentcraft hq`.
 **Your name.** The agents call you by your OS user name. Change it with
 `-ForemanArgs '--user-name','Sam'`, `AGENTCRAFT_USER_NAME`, or `{"userName": "Sam"}` in
 `~/.agentcraft/config.json`.
+
+### MiniMax Coding/Token Plan
+
+Get a key from your MiniMax **Coding/Token Plan**, then set it in the terminal launching AgentCraft.
+The international Anthropic-compatible endpoint is `https://api.minimax.io/anthropic`.
+Keep the key in the environment; never paste it into source, goals, or checked-in config.
+
+Windows PowerShell, from the AgentCraft checkout:
+
+```powershell
+$env:MINIMAX_API_KEY = '<your-Coding-Plan-key>'
+$env:MINIMAX_MODEL = 'MiniMax-M3'  # optional; current default
+tools\launch.ps1 -Repo C:\path\to\repo -Profile minimax `
+  -ForemanArgs '--provider','minimax'
+```
+
+macOS:
+
+```sh
+export AGENTCRAFT_PROVIDER=minimax
+export MINIMAX_API_KEY='<your-Coding-Plan-key>'
+export MINIMAX_MODEL=MiniMax-M3
+node tools/mac.mjs launch --repo /path/to/repo --profile minimax
+```
+
+macOS/Linux, Foreman alone (the terminal client works without Minecraft):
+
+```sh
+export MINIMAX_API_KEY='<your-Coding-Plan-key>'
+cd foreman
+npm ci
+npm run start -- --provider minimax --profile minimax --repo /path/to/repo
+# In another terminal: cd foreman && npm run tui
+```
+
+`--provider minimax` and `AGENTCRAFT_PROVIDER=minimax` select inference; the backend stays `claude`.
+Stop an already running Foreman before switching providers. The launchers reuse a running profile;
+using `minimax` as a separate profile avoids reusing an Anthropic session.
+If your saved config enables Claude login, also pass `--no-use-claude-login` in Foreman arguments.
+
+Optional overrides: `MINIMAX_BASE_URL`, `MINIMAX_MODEL`, `MINIMAX_LEAD_MODEL`, and
+`MINIMAX_WORKER_MODEL`; existing `--model`, `--lead-model`, and `--worker-model` take priority.
+M3 remains the default in the [current integration guide](https://platform.minimax.io/docs/token-plan/claude-code)
+(checked 2026-10-03); choose any model your plan exposes. All SDK model aliases, including its
+small/fast model, map to the selected model per agent. No manual Anthropic environment setup is needed.
+`.env.example` is a reference, not an automatically loaded secrets file.
+For M3's 1M context, the MiniMax guide uses `MINIMAX_MODEL='MiniMax-M3[1m]'`.
+Without that marker the installed SDK conservatively assumes 200k tokens.
+
+The adapter only changes the SDK child environment. Task scheduling, MCP tools, worktrees,
+permissions, sessions/resume, CI, and your merge approval stay on the existing code paths.
+Claude's effort override is omitted in MiniMax mode; the model/harness defaults apply.
+The installed SDK may still send its own default effort; acceptance by MiniMax needs the live check.
+The [compatibility guide](https://platform.minimax.io/docs/api-reference/text-anthropic-api) documents
+effort tuning specifically for M3.1-Flash-Preview, rather than M3. Anthropic effort settings are unaffected.
+Claude-specific server tools such as WebSearch are not provided by MiniMax; AgentCraft's own MCP
+tools run locally. SDK-reported USD costs are not a reliable measure of Coding Plan quota.
+
+The SDK's `accountInfo()` returns local initialization metadata, so the banner confirms configured
+credentials rather than a successful billed request. Real 401/403, model, quota, and network errors
+surface during agent turns. To verify actual inference, MCP calls, edits, tests, sessions and review:
+
+```sh
+cd foreman
+npm run smoke:minimax
+```
+
+This uses your key/quota on a temporary repository with one worker and stops at a pending merge
+approval; it never approves permissions or merges. Automated tests exercise these paths with fake
+inference. Live MiniMax inference is **not yet verified** without a Coding Plan key.
+
+Command Code's live [model metadata](https://api.commandcode.ai/provider/v1/models) was checked
+2026-10-03: Claude models support `/messages`; MiniMax M3/M2.7/M2.5 support only
+`/chat/completions` and `/responses`. Claude can use the existing gateway path with
+`ANTHROPIC_BASE_URL=https://api.commandcode.ai/provider` (the SDK appends `/v1/messages`),
+`ANTHROPIC_AUTH_TOKEN` set from your Command Code key, and an explicit supported Claude model.
+MiniMax through Command Code needs an OpenAI-compatible backend/adapter, so it is not added here.
 
 <br>
 
